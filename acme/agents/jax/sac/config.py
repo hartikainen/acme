@@ -50,6 +50,7 @@ class SACConfig(normalization.InputNormalizerConfig):
 
   # How many gradient updates to perform per step.
   num_sgd_steps_per_step: int = 1
+  num_critics: int = 2
 
   input_normalization: Optional[normalization.NormalizationConfig] = None
 

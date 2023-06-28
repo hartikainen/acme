@@ -33,10 +33,10 @@ import reverb
 class TrainingState(NamedTuple):
   """Contains training state for the learner."""
   policy_optimizer_state: optax.OptState
-  q_optimizer_state: optax.OptState
+  qs_optimizer_state: optax.OptState
   policy_params: networks_lib.Params
-  q_params: networks_lib.Params
-  target_q_params: networks_lib.Params
+  qs_params: networks_lib.Params
+  target_qs_params: networks_lib.Params
   key: networks_lib.PRNGKey
   alpha_optimizer_state: Optional[optax.OptState] = None
   alpha_params: Optional[networks_lib.Params] = None
@@ -61,7 +61,8 @@ class SACLearner(acme.Learner):
       target_entropy: float = 0,
       counter: Optional[counting.Counter] = None,
       logger: Optional[loggers.Logger] = None,
-      num_sgd_steps_per_step: int = 1):
+      num_sgd_steps_per_step: int = 1,
+      num_critics: int = 2):
     """Initialize the SAC learner.
 
     Args:
@@ -80,6 +81,7 @@ class SACLearner(acme.Learner):
       counter: counter object used to keep track of steps.
       logger: logger object to be used by learner.
       num_sgd_steps_per_step: number of sgd steps to perform per learner 'step'.
+      num_critics: critic ensemble size.
     """
     adaptive_entropy_coefficient = entropy_coefficient is None
     if adaptive_entropy_coefficient:
@@ -151,7 +153,8 @@ class SACLearner(acme.Learner):
         transitions: types.Transition,
     ) -> Tuple[TrainingState, Dict[str, jnp.ndarray]]:
 
-      key, key_alpha, key_critic, key_actor = jax.random.split(state.key, 4)
+      key, key_alpha, *key_critics, key_actor = jax.random.split(
+        state.key, 2 + num_critics + 1)
       if adaptive_entropy_coefficient:
         alpha_loss, alpha_grads = alpha_grad(state.alpha_params,
                                              state.policy_params, transitions,
@@ -159,10 +162,7 @@ class SACLearner(acme.Learner):
         alpha = jnp.exp(state.alpha_params)
       else:
         alpha = entropy_coefficient
-      critic_loss, critic_grads = critic_grad(state.q_params,
-                                              state.policy_params,
-                                              state.target_q_params, alpha,
-                                              transitions, key_critic)
+
       actor_loss, actor_grads = actor_grad(state.policy_params, state.q_params,
                                            alpha, transitions, key_actor)
 
@@ -171,25 +171,42 @@ class SACLearner(acme.Learner):
           actor_grads, state.policy_optimizer_state)
       policy_params = optax.apply_updates(state.policy_params, actor_update)
 
-      # Apply critic gradients
-      critic_update, q_optimizer_state = q_optimizer.update(
-          critic_grads, state.q_optimizer_state)
-      q_params = optax.apply_updates(state.q_params, critic_update)
+      critic_losses = []
+      new_qs_optimizer_state = []
+      new_qs_params = []
+      new_target_qs_params = []
 
-      new_target_q_params = jax.tree_map(lambda x, y: x * (1 - tau) + y * tau,
-                                         state.target_q_params, q_params)
+      for q_params, target_q_params, q_optimizer_state, key_critic in zip(
+          state.qs_params, state.target_qs_params, state.qs_optimizer_state,
+          key_critics):
+        critic_loss, critic_grads = critic_grad(q_params,
+                                                state.policy_params,
+                                                target_q_params, alpha,
+                                                transitions, key_critic)
+        # Apply critic gradients
+        critic_update, new_q_optimizer_state = q_optimizer.update(
+            critic_grads, q_optimizer_state)
+        new_q_params = optax.apply_updates(q_params, critic_update)
+
+        new_target_q_params = jax.tree_map(lambda x, y: x * (1 - tau) + y * tau,
+                                           target_q_params, q_params)
+
+        critic_losses.append(critic_loss)
+        new_qs_optimizer_state.append(new_q_optimizer_state)
+        new_qs_params.append(new_q_params)
+        new_target_qs_params.append(new_target_q_params)
 
       metrics = {
-          'critic_loss': critic_loss,
+          'critic_loss': jnp.mean(critic_losses, axis=0),
           'actor_loss': actor_loss,
       }
 
       new_state = TrainingState(
           policy_optimizer_state=policy_optimizer_state,
-          q_optimizer_state=q_optimizer_state,
+          q_optimizer_state=new_qs_optimizer_state,
           policy_params=policy_params,
-          q_params=q_params,
-          target_q_params=new_target_q_params,
+          qs_params=new_qs_params,
+          target_qs_params=new_target_qs_params,
           key=key,
       )
       if adaptive_entropy_coefficient:
@@ -229,20 +246,19 @@ class SACLearner(acme.Learner):
 
     def make_initial_state(key: networks_lib.PRNGKey) -> TrainingState:
       """Initialises the training state (parameters and optimiser state)."""
-      key_policy, key_q, key = jax.random.split(key, 3)
+      key_policy, *key_qs, key = jax.random.split(key, 1 + num_critics + 1)
 
       policy_params = networks.policy_network.init(key_policy)
       policy_optimizer_state = policy_optimizer.init(policy_params)
-
-      q_params = networks.q_network.init(key_q)
-      q_optimizer_state = q_optimizer.init(q_params)
+      qs_params = [networks.q_network.init(key_q) for key_q in key_qs]
+      qs_optimizer_state = [q_optimizer.init(q_params) for q_params in qs_params]
 
       state = TrainingState(
           policy_optimizer_state=policy_optimizer_state,
-          q_optimizer_state=q_optimizer_state,
+          qs_optimizer_state=qs_optimizer_state,
           policy_params=policy_params,
-          q_params=q_params,
-          target_q_params=q_params,
+          qs_params=qs_params,
+          target_qs_params=qs_params,
           key=key)
 
       if adaptive_entropy_coefficient:

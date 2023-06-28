@@ -14,6 +14,8 @@
 
 """Example running SAC on continuous control tasks."""
 
+import pathlib
+
 from absl import flags
 from acme import specs
 from acme.agents.jax import normalization
@@ -25,6 +27,10 @@ from acme.jax import experiments
 from acme.utils import lp_utils
 import launchpad as lp
 
+from mocap_environments.data import simple_humanoid_amass
+from mocap_environments.environments import humanoid_motion_tracking
+
+Path = pathlib.Path
 FLAGS = flags.FLAGS
 
 flags.DEFINE_bool(
@@ -39,10 +45,24 @@ flags.DEFINE_integer('evaluation_episodes', 10, 'Evaluation episodes.')
 
 def build_experiment_config():
   """Builds SAC experiment config which can be executed in different ways."""
-  # Create an environment, grab the spec, and use it to create networks.
+  data_path = Path(
+      "~/tmp/data/mjpc-dagger/physics-dataset-2023-06-17"
+  ).expanduser()
+  motion_dataset = simple_humanoid_amass.load_dataset(
+      data_path=data_path,
+      mocap_id_filter_regex=r"^CMU/CMU/(?:108/108_13)_poses(?:\.npy|\.npz|\.xml)?$",
+  )
 
-  suite, task = FLAGS.env_name.split(':', 1)
-  environment = helpers.make_environment(suite, task)
+  environment = humanoid_motion_tracking.load(
+      walker_type="SimpleHumanoidPositionControlled",
+      random_state=None,
+      task_kwargs={
+          "termination_threshold": 1.0,
+          "motion_dataset": motion_dataset,
+          "mocap_reference_steps": 0,
+          "random_init_time_step": False,
+      },
+  )
 
   environment_spec = specs.make_environment_spec(environment)
   network_factory = (
@@ -53,7 +73,10 @@ def build_experiment_config():
       learning_rate=3e-4,
       n_step=2,
       target_entropy=sac.target_entropy_from_env_spec(environment_spec),
-      input_normalization=normalization.NormalizationConfig())
+      input_normalization=normalization.NormalizationConfig(),
+      num_sgd_steps_per_step=10,
+      num_critics=8,
+  )
   sac_builder = builder.SACBuilder(config)
 
   return experiments.ExperimentConfig(
