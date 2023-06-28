@@ -41,6 +41,10 @@ tensorflow = [
     'tensorflow_probability==0.15.0',
     'tensorflow_datasets==4.6.0',
     'dm-reverb==0.7.2',
+    # 'tensorflow==2.12.0',
+    # 'tensorflow_probability',
+    # 'tensorflow_datasets',
+    # 'dm-reverb>=0.11,<0.12',
     'dm-launchpad==0.5.2',
 ]
 
@@ -54,7 +58,7 @@ core_requirements = [
 ]
 
 jax_requirements = [
-    'jax>=0.4.3',
+    'jax[cuda11_pip]>=0.4.13',
     'chex',
     'dm-haiku',
     'flax',
@@ -73,13 +77,14 @@ testing_requirements = [
 ]
 
 envs_requirements = [
-    'atari-py',
+    # 'atari-py',
     'bsuite',
     'dm-control',
-    'gym==0.25.0',
-    'gym[atari]',
-    'pygame==2.1.0',
-    'rlds',
+    'mocap-environments @ git+https://github.com/hartikainen/mocap-environments.git@7b56e3ede081fcb4579c918bc66052a7950d8b69'
+    # 'gym==0.25.0',
+    # 'gym[atari]',
+    # 'pygame==2.1.0',
+    # 'rlds',
 ]
 
 
@@ -152,6 +157,9 @@ setup(
     package_data={'': ['requirements.txt']},
     include_package_data=True,
     install_requires=core_requirements,
+    dependency_links=[
+      'https://storage.googleapis.com/jax-releases/jax_cuda_releases.html',
+    ],
     extras_require={
         'jax': jax_requirements,
         'tf': tf_requirements,
