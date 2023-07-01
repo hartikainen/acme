@@ -29,6 +29,8 @@ import jax.numpy as jnp
 import optax
 import reverb
 
+_PMAP_AXIS_NAME = "data"
+
 
 class TrainingState(NamedTuple):
   """Contains training state for the learner."""
@@ -165,6 +167,7 @@ class SACLearner(acme.Learner):
 
       actor_loss, actor_grads = actor_grad(state.policy_params, state.q_params,
                                            alpha, transitions, key_actor)
+      actor_grads = jax.lax.pmean(actor_grads, axis_name=_PMAP_AXIS_NAME)
 
       # Apply policy gradients
       actor_update, policy_optimizer_state = policy_optimizer.update(
@@ -200,6 +203,7 @@ class SACLearner(acme.Learner):
           'critic_loss': jnp.mean(critic_losses, axis=0),
           'actor_loss': actor_loss,
       }
+      metrics = jax.lax.pmean(metrics, axis_name=_PMAP_AXIS_NAME)
 
       new_state = TrainingState(
           policy_optimizer_state=policy_optimizer_state,
@@ -241,8 +245,8 @@ class SACLearner(acme.Learner):
 
     update_step = utils.process_multiple_batches(update_step,
                                                  num_sgd_steps_per_step)
-    # Use the JIT compiler.
-    self._update_step = jax.jit(update_step)
+    # `pmap` implicitly JITs `update_step`.
+    self._update_step = jax.pmap(multi_update_step, axis_name=_PMAP_AXIS_NAME)
 
     def make_initial_state(key: networks_lib.PRNGKey) -> TrainingState:
       """Initialises the training state (parameters and optimiser state)."""
@@ -267,7 +271,7 @@ class SACLearner(acme.Learner):
       return state
 
     # Create initial state.
-    self._state = make_initial_state(rng)
+    self._state = utils.replicate_in_all_devices(make_initial_state(rng))
 
     # Do not record timestamps until after the first learning step is done.
     # This is to avoid including the time it takes for actors to come online and
@@ -279,6 +283,7 @@ class SACLearner(acme.Learner):
     transitions = types.Transition(*sample.data)
 
     self._state, metrics = self._update_step(self._state, transitions)
+    metrics = utils.get_from_first_device(metrics)
 
     # Compute elapsed time.
     timestamp = time.time()
@@ -292,14 +297,16 @@ class SACLearner(acme.Learner):
     self._logger.write({**metrics, **counts})
 
   def get_variables(self, names: List[str]) -> List[Any]:
+    first_device_state = jax.tree_map(utils.get_from_first_device, self._state)
     variables = {
-        'policy': self._state.policy_params,
+        'policy': first_device_state.policy_params,
         'critic': self._state.q_params,
     }
     return [variables[name] for name in names]
 
   def save(self) -> TrainingState:
-    return self._state
+    # Serialize only the first replica of parameters and optimizer state.
+    return jax.tree_map(utils.get_from_first_device, self._state)
 
   def restore(self, state: TrainingState):
-    self._state = state
+    self._state = utils.replicate_in_all_devices(state)

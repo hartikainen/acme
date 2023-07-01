@@ -18,6 +18,7 @@ from typing import Iterator, List, Optional
 import acme
 from acme import adders
 from acme import core
+from acme import datasets
 from acme import specs
 from acme.adders import reverb as adders_reverb
 from acme.agents.jax import actor_core as actor_core_lib
@@ -27,7 +28,6 @@ from acme.agents.jax import normalization
 from acme.agents.jax.sac import config as sac_config
 from acme.agents.jax.sac import learning
 from acme.agents.jax.sac import networks as sac_networks
-from acme.datasets import reverb as datasets
 from acme.jax import networks as networks_lib
 from acme.jax import utils
 from acme.jax import variable_utils
@@ -132,13 +132,22 @@ class SACBuilder(builders.ActorLearnerBuilder[sac_networks.SACNetworks,
   def make_dataset_iterator(
       self, replay_client: reverb.Client) -> Iterator[reverb.ReplaySample]:
     """Create a dataset iterator to use for learning/updating the agent."""
+    per_device_batch_size, ragged = divmod(
+        self._config.batch_size, jax.device_count()
+    )
+    if ragged:
+        raise ValueError(
+            "Learner batch size must be divisible by total number of devices!"
+        )
+
     dataset = datasets.make_reverb_dataset(
         table=self._config.replay_table_name,
         server_address=replay_client.server_address,
-        batch_size=(self._config.batch_size *
-                    self._config.num_sgd_steps_per_step),
+        batch_size=int(
+          per_device_batch_size * self._config.num_sgd_steps_per_step),
         prefetch_size=self._config.prefetch_size)
-    return utils.device_put(dataset.as_numpy_iterator(), jax.devices()[0])
+    sharded_iterator = utils.sharded_prefetch(datasets.NumpyIterator(dataset))
+    return sharded_iterator
 
   def make_adder(
       self, replay_client: reverb.Client,
